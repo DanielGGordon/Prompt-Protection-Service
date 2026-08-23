@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Local runtime config (host/port/model paths differ per machine).
+.env
+
+# Audit log records raw message text for false-positive tuning — local only,
+# never committed (may contain sensitive content from screened messages).
+.state/
