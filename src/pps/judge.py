@@ -1,7 +1,8 @@
 """Two-stage prompt judge.
 
-Stage 0 (optional): a small local classifier (Prompt Guard class) that catches
-blatant injection/jailbreak payloads in milliseconds.
+Stage 0 (optional, advisory): a small local classifier (Prompt Guard class)
+that scores injection likelihood. It never decides a verdict; a high score is
+only annotated onto the stage-1 verdict for the audit log.
 Stage 1: a small local guard LLM (llama-server, OpenAI-compatible) that applies
 the caller-supplied per-sender policy and returns a structured verdict.
 
@@ -163,24 +164,18 @@ class Judge:
             except Exception:  # noqa: BLE001 - classifier failure falls through to LLM
                 log.warning("stage0 classifier failed", exc_info=True)
                 prob = None
-            if prob is not None and prob >= self.cfg.stage0_hard_deny_threshold:
-                # Essentially always a real attack at this confidence (blatant
-                # "ignore all previous instructions" / "SYSTEM OVERRIDE" payloads
-                # score ~1.00) — safe to auto-deny without spending an LLM call.
-                stage = "classifier"
-                result = {"verdict": "deny", "category": "prompt_injection",
-                          "reason": f"injection classifier score {prob:.2f}"}
-                result.update(stage=stage, latency_ms=int((time.monotonic() - t0) * 1000))
-                return result
             if prob is not None and prob >= self.cfg.stage0_threshold:
-                # Suspicious but below the hard-deny line: stage0 alone is not
-                # reliable enough here (borderline scores like 0.91 have hit
-                # ordinary benign messages) — escalate to the stage-1 LLM for
-                # the final call instead of auto-denying.
+                # Advisory only: stage0 never denies on its own. DeBERTa-class
+                # injection classifiers score ordinary imperative requests
+                # ("no need for the continue button, just move to the next
+                # turn") at 0.96-1.00, the same band as real payloads, so no
+                # threshold separates them. The stage-1 LLM -- which sees the
+                # sender's policy -- always makes the call; the score is kept
+                # in the reason for the audit log.
                 stage = "classifier+llm"
                 result = self._llm_verdict(sender, policy, text)
                 result["reason"] = (
-                    f"[escalated: classifier score {prob:.2f}] {result.get('reason', '')}"
+                    f"[classifier score {prob:.2f}] {result.get('reason', '')}"
                 )
                 result.update(stage=stage, latency_ms=int((time.monotonic() - t0) * 1000))
                 return result

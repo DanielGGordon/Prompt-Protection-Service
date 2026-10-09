@@ -34,18 +34,21 @@ python3 scripts/eval.py        # labeled smoke-eval against the live service
 
 Env (see `src/pps/config.py`): `PPS_PORT` (8642), `PPS_LLM_URL`
 (http://127.0.0.1:8641), `PPS_STAGE0_DIR` (classifier model dir; empty = skip),
-`PPS_STAGE0_THRESHOLD` (0.9), `PPS_STAGE0_HARD_DENY_THRESHOLD` (0.98),
-`PPS_MAX_TEXT_CHARS` (6000).
+`PPS_STAGE0_THRESHOLD` (0.9), `PPS_MAX_TEXT_CHARS` (6000).
 
-Stage 0 does not have unilateral deny power at its base threshold: a score in
-`[PPS_STAGE0_THRESHOLD, PPS_STAGE0_HARD_DENY_THRESHOLD)` is "suspicious" and is
-escalated to the stage-1 LLM for a second opinion (`stage: "classifier+llm"`
-in the audit log) rather than auto-denied. Only scores >=
-`PPS_STAGE0_HARD_DENY_THRESHOLD` are auto-denied without an LLM call — in
-practice stage0 is essentially always right up there (blatant "ignore all
-previous instructions" / "SYSTEM OVERRIDE" payloads score ~1.00). This avoids
-false positives like a borderline 0.91 score denying an ordinary benign
-message with no LLM review at all.
+Stage 0 is advisory only: it never denies. Every message goes to the stage-1
+LLM, which sees the sender's policy and makes the call; a classifier score >=
+`PPS_STAGE0_THRESHOLD` is recorded in the verdict reason (`stage:
+"classifier+llm"` in the audit log). It used to auto-deny at >= 0.98, but on
+real guest traffic (2026-10) it scored ordinary imperative feature requests
+("no need for the continue button, just move to the next turn") at 0.96-1.00,
+the same band as real payloads -- 10 of 18 Slack false positives. The LLM
+alone denies the blatant payloads it used to catch (`scripts/eval.py`).
+
+The guest policy should say what the project *is*, not just its name. With
+only a name, the 4B judge rules in-domain requests out of scope (a board
+game's "Mazel cards" and "fabric tokens"); slackcc appends each channel's
+`description` for this.
 
 ```bash
 python3 -m unittest discover -s tests -v   # unit tests for the judge routing (no live services needed)
