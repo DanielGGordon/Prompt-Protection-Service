@@ -1,16 +1,15 @@
 """Unit tests for pps.judge.Judge's stage0 -> stage1 routing.
 
-Root cause under test: stage0 (the fast Prompt Guard-family classifier) used
-to have unilateral deny power at its threshold (0.9) with NO stage-1 LLM
-fallback. That auto-denied a real, benign Slack message from a guest
-("Whats the last thing we worked on and what do you need from me") which
-scored 0.91 -- a false positive (see .state/audit.jsonl, 2026-07-30T15:55:35).
+History: stage0 (the fast Prompt Guard-family classifier) first had
+unilateral deny power at 0.9, which auto-denied a benign guest message scoring
+0.91 (audit log, 2026-07-30). It was then narrowed to auto-deny only at
+>= 0.98 -- but on real guest traffic (2026-10, a board-game channel) it scored
+ordinary imperative feature requests ("there's no need for the end turn
+button, just move to the next player") at 0.96-1.00, the same band as real
+payloads.
 
-Fix: stage0 hits in [stage0_threshold, stage0_hard_deny_threshold) are
-"suspicious" and get escalated to the stage-1 LLM for a second opinion,
-instead of being auto-denied. Only scores >= stage0_hard_deny_threshold
-(default 0.98) are still auto-denied without an LLM call, since the known
-blatant injection payloads in the audit log score ~1.00.
+Now stage0 is advisory only: every message goes to the stage-1 LLM, which
+makes the call; a score >= stage0_threshold is annotated onto the reason.
 
 These tests stub out both the heavy stage0 classifier (never load torch/HF)
 and the stage-1 LLM call (never hit a live llama-server), per pps's own
@@ -62,33 +61,47 @@ def make_judge(stage0_fn=None) -> Judge:
     return judge
 
 
-class TestHardDenyBand(unittest.TestCase):
-    """Scores >= stage0_hard_deny_threshold (0.98) must still auto-deny,
-    without ever calling the stage-1 LLM."""
+# Real 2026-10-08 guest feature request the classifier scored 1.00.
+FEATURE_REQUEST = (
+    "<@U0BDHRS3TEV> when I get a mazel card, after you show me what I got "
+    "points money, whatever it may be, it should just automatically move into "
+    "the next thing without having to click the continue button"
+)
 
-    def test_blatant_injection_denied_without_llm_call(self):
+
+class TestNoClassifierDeny(unittest.TestCase):
+    """Stage0 has no deny power at any score: the LLM always decides."""
+
+    def test_max_score_feature_request_goes_to_llm_and_is_allowed(self):
+        judge = make_judge(stage0_fn=lambda t: 1.00)
+        with patch.object(
+            Judge, "_llm_verdict",
+            return_value={"verdict": "allow", "category": "ok",
+                          "reason": "game UI change request"},
+        ) as mock_llm:
+            result = judge.judge("Rabbi Shulman", "guest policy", FEATURE_REQUEST)
+        mock_llm.assert_called_once()
+        self.assertEqual(result["verdict"], "allow")
+        self.assertEqual(result["stage"], "classifier+llm")
+        self.assertIn("classifier score 1.00", result["reason"])
+
+    def test_blatant_injection_still_denied_by_llm(self):
         for text in BLATANT_INJECTIONS:
             with self.subTest(text=text):
                 judge = make_judge(stage0_fn=lambda t: 1.00)
-                with patch.object(Judge, "_llm_verdict") as mock_llm:
+                with patch.object(
+                    Judge, "_llm_verdict",
+                    return_value={"verdict": "deny", "category": "prompt_injection",
+                                  "reason": "instruction override"},
+                ) as mock_llm:
                     result = judge.judge("Berish", "guest policy", text)
-                mock_llm.assert_not_called()
+                mock_llm.assert_called_once()
                 self.assertEqual(result["verdict"], "deny")
                 self.assertEqual(result["category"], "prompt_injection")
-                self.assertEqual(result["stage"], "classifier")
-
-    def test_just_above_hard_deny_line_denies_without_llm(self):
-        judge = make_judge(stage0_fn=lambda t: 0.98)  # exactly at the hard-deny line
-        with patch.object(Judge, "_llm_verdict") as mock_llm:
-            result = judge.judge("attacker", "policy", "whatever")
-        mock_llm.assert_not_called()
-        self.assertEqual(result["verdict"], "deny")
-        self.assertEqual(result["stage"], "classifier")
 
 
 class TestEscalationBand(unittest.TestCase):
-    """Scores in [0.9, 0.98) must NOT be auto-denied by stage0 alone -- they
-    must be escalated to the stage-1 LLM, which gets the final call."""
+    """Flagged scores are escalated to the stage-1 LLM, which gets the final call."""
 
     def test_berish_false_positive_escalates_and_is_allowed(self):
         judge = make_judge(stage0_fn=lambda t: BENIGN_SCORE)
@@ -102,7 +115,7 @@ class TestEscalationBand(unittest.TestCase):
         mock_llm.assert_called_once()
         self.assertEqual(result["verdict"], "allow")
         self.assertEqual(result["stage"], "classifier+llm")
-        self.assertIn("escalated", result["reason"])
+        self.assertIn("classifier score", result["reason"])
         self.assertIn(f"{BENIGN_SCORE:.2f}", result["reason"])
 
     def test_escalation_band_llm_can_still_deny(self):
