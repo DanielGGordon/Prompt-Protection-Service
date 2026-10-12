@@ -10,3 +10,6 @@ venv/
 # Audit log records raw message text for false-positive tuning — local only,
 # never committed (may contain sensitive content from screened messages).
 .state/
+*.egg-info/
+build/
+dist/
