@@ -54,9 +54,50 @@ game's "Mazel cards" and "fabric tokens"); slackcc appends each channel's
 python3 -m unittest discover -s tests -v   # unit tests for the judge routing (no live services needed)
 ```
 
+## Stage-1 model
+
 The stage-1 model is served by llama.cpp's `llama-server` (`~/tools/llama.cpp`,
-model GGUFs in `~/models/pps/`) — see the exact command in `/tmp/llama-guard.log`
-startup or the systemd notes below.
+model GGUFs in `~/models/pps/`); `scripts/run-llm.sh` is the exact command the
+`llama-guard` user unit runs.
+
+Current model: **Qwen3-4B-Instruct-2507, Q4_K_M** (2.5 GB file). Flags that
+matter, and why (measured 2026-10-16 on the 24-core EPYC, CPU only):
+
+| Flag | Why |
+|---|---|
+| `--threads 24` | physical cores; 48 threads is ~2x slower, 12 is 1.5x slower |
+| `-c 8192 -np 2` | two 4096-token slots; a judgment is at most ~2.5k tokens (6000-char text + policy) |
+| `-fa on -ctk q8_0 -ctv q8_0` | 8-bit KV cache: no measurable speed or accuracy cost on CPU, smaller RSS |
+| `--cache-ram 1024` | the server-wide prompt cache defaults to 8 GiB and fills up over a day; it is what took the server from ~5 GB to ~14 GB RSS. 1 GiB keeps the useful part (shared system prompt + a few policies) |
+
+With these the server starts at ~4.8 GB RSS and stays near 5 GB. `scripts/eval.py`
+passes 32/32 at p50 1.7 s per judgment (2.3 s the day before with four
+8192-token slots and the default cache; box load differed, so treat the
+speedup as "no slower").
+
+### Qwen3.5-4B, evaluated and rejected (2026-10-16)
+
+Qwen3.5-4B (Q4_K_M, thinking disabled via
+`--chat-template-kwargs '{"enable_thinking":false}'`; `--reasoning-budget 0`
+does not work for its template) was run side by side on 1,105 historical
+judgments and the labeled eval:
+
+- **Memory:** no gain (4.1 GB vs 4.8 GB at start; the prompt cache dominated both).
+- **Speed:** ~2x slower per judgment on CPU (p50 4.2 s vs 2.3 s single stream;
+  5.0 s vs 2.3 s per row under replay). Its hybrid DeltaNet layers have slow CPU
+  kernels; threads and flags do not help. Alfred's voice path gives a guest's
+  act tool 6 s to wait for a speech verdict, so this sits at the budget.
+- **Accuracy:** a wash. Better on Alfred call cards (it follows the "to-dos that
+  mention calling/deleting are allowed" rule, where Qwen3-4B still produces
+  ~1% "destructive" false denies); worse on Slack guests (3 new false denies on
+  in-scope game-feature requests out of 127, incl. "rename the app to Jeutopia");
+  identical on factory customers; neither model missed a genuine attack. Labeled
+  eval 31/32 vs 32/32.
+
+Re-evaluate when a build with faster DeltaNet CPU kernels or a stronger
+small dense instruct model appears. Replay tooling: `/tmp/pps-replay/` at the
+time (replay.py rebuilds each caller's policy from the live sources; analyze.py
+compares two runs).
 
 ## Secret scanner (shared library)
 
